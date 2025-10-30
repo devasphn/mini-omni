@@ -61,7 +61,25 @@ class Tokenizer:
             self.bos_id = self.processor.bos_id()
             self.eos_id = self.processor.eos_id()
         else:
-            raise NotImplementedError
+            # Enhanced error handling with more specific information
+            available_files = list(checkpoint_dir.glob("*"))
+            file_names = [f.name for f in available_files]
+            
+            error_msg = (
+                f"No suitable tokenizer files found in {checkpoint_dir}.\n"
+                f"Expected either 'tokenizer.json' or 'tokenizer.model'.\n"
+                f"Available files: {file_names}\n"
+                f"This usually means the checkpoint directory is incomplete or corrupted.\n"
+                f"Try deleting the checkpoint directory and re-running to download fresh files."
+            )
+            
+            # Try to provide more helpful information
+            if not available_files:
+                error_msg += f"\nThe directory {checkpoint_dir} is empty."
+            elif any("config" in f.name.lower() for f in available_files):
+                error_msg += "\nFound config files but missing tokenizer files."
+                
+            raise FileNotFoundError(error_msg)
 
     @property
     def vocab_size(self) -> int:
