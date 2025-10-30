@@ -347,41 +347,157 @@ def T1_T2(fabric, input_ids, model, text_tokenizer, step):
 
     
 def load_model(ckpt_dir, device):
-    snacmodel = SNAC.from_pretrained("hubertsiuzdak/snac_24khz").eval().to(device)
-    whispermodel = whisper.load_model("small").to(device)
-    text_tokenizer = Tokenizer(ckpt_dir)
+    """Load all model components with enhanced error handling and debugging."""
+    
+    print(f"Loading models from {ckpt_dir}...")
+    
+    # Load SNAC model
+    print("Loading SNAC model...")
+    try:
+        snacmodel = SNAC.from_pretrained("hubertsiuzdak/snac_24khz").eval().to(device)
+        print("✓ SNAC model loaded successfully")
+    except Exception as e:
+        print(f"✗ Failed to load SNAC model: {e}")
+        raise
+    
+    # Load Whisper model
+    print("Loading Whisper model...")
+    try:
+        whispermodel = whisper.load_model("small").to(device)
+        print("✓ Whisper model loaded successfully")
+    except Exception as e:
+        print(f"✗ Failed to load Whisper model: {e}")
+        raise
+    
+    # Load text tokenizer with enhanced debugging
+    print(f"Loading text tokenizer from {ckpt_dir}...")
+    try:
+        # Check if checkpoint directory exists and list contents
+        ckpt_path = Path(ckpt_dir)
+        if not ckpt_path.exists():
+            raise FileNotFoundError(f"Checkpoint directory {ckpt_dir} does not exist")
+        
+        files_in_dir = list(ckpt_path.glob("*"))
+        print(f"Files in checkpoint directory: {[f.name for f in files_in_dir]}")
+        
+        text_tokenizer = Tokenizer(ckpt_dir)
+        print("✓ Text tokenizer loaded successfully")
+    except Exception as e:
+        print(f"✗ Failed to load text tokenizer: {e}")
+        print(f"This usually means the checkpoint files are missing or corrupted.")
+        print(f"Try deleting {ckpt_dir} and re-running to download fresh files.")
+        raise
+    
+    # Initialize Fabric
+    print("Initializing Lightning Fabric...")
     fabric = L.Fabric(devices=1, strategy="auto")
-    config = Config.from_file(ckpt_dir + "/model_config.yaml")
-    config.post_adapter = False
+    
+    # Load model config
+    print("Loading model configuration...")
+    try:
+        config_path = os.path.join(ckpt_dir, "model_config.yaml")
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"Model config file not found: {config_path}")
+        
+        config = Config.from_file(config_path)
+        config.post_adapter = False
+        print("✓ Model configuration loaded successfully")
+    except Exception as e:
+        print(f"✗ Failed to load model configuration: {e}")
+        raise
 
-    with fabric.init_module(empty_init=False):
-        model = GPT(config)
-
-    model = fabric.setup(model)
-    state_dict = lazy_load(ckpt_dir + "/lit_model.pth")
-    model.load_state_dict(state_dict, strict=True)
-    model.to(device).eval()
-
+    # Initialize and load GPT model
+    print("Initializing GPT model...")
+    try:
+        with fabric.init_module(empty_init=False):
+            model = GPT(config)
+        
+        model = fabric.setup(model)
+        
+        # Load model weights
+        model_path = os.path.join(ckpt_dir, "lit_model.pth")
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Model weights file not found: {model_path}")
+            
+        state_dict = lazy_load(model_path)
+        model.load_state_dict(state_dict, strict=True)
+        model.to(device).eval()
+        print("✓ GPT model loaded successfully")
+    except Exception as e:
+        print(f"✗ Failed to load GPT model: {e}")
+        raise
+    
+    print("All models loaded successfully!")
     return fabric, model, text_tokenizer, snacmodel, whispermodel
 
     
 def download_model(ckpt_dir):
+    """Download model with enhanced error handling and progress tracking."""
+    
     repo_id = "gpt-omni/mini-omni"
-    snapshot_download(repo_id, local_dir=ckpt_dir, revision="main")
+    print(f"Downloading model from {repo_id} to {ckpt_dir}...")
+    
+    try:
+        # Create directory if it doesn't exist
+        os.makedirs(ckpt_dir, exist_ok=True)
+        
+        # Download with progress tracking
+        snapshot_download(
+            repo_id, 
+            local_dir=ckpt_dir, 
+            revision="main",
+            local_dir_use_symlinks=False  # Ensure actual files are downloaded
+        )
+        
+        print(f"✓ Model downloaded successfully to {ckpt_dir}")
+        
+        # Verify critical files exist
+        critical_files = [
+            "tokenizer.json",
+            "tokenizer_config.json", 
+            "model_config.yaml",
+            "lit_model.pth"
+        ]
+        
+        missing_files = []
+        for file in critical_files:
+            if not os.path.exists(os.path.join(ckpt_dir, file)):
+                missing_files.append(file)
+        
+        if missing_files:
+            raise FileNotFoundError(
+                f"Download completed but missing critical files: {missing_files}. "
+                f"This might be a network issue. Try deleting {ckpt_dir} and running again."
+            )
+        
+        print("✓ All critical files verified")
+        
+    except Exception as e:
+        print(f"✗ Failed to download model: {e}")
+        print(f"You can also manually download from: https://huggingface.co/{repo_id}")
+        raise
 
     
 class OmniInference:
 
     def __init__(self, ckpt_dir='./checkpoint', device='cuda:0'):
         self.device = device
+        print(f"Initializing OmniInference with checkpoint: {ckpt_dir}, device: {device}")
+        
         if not os.path.exists(ckpt_dir):
-            print(f"checkpoint directory {ckpt_dir} not found, downloading from huggingface")
+            print(f"Checkpoint directory {ckpt_dir} not found, downloading from huggingface...")
             download_model(ckpt_dir)
+        else:
+            print(f"Using existing checkpoint directory: {ckpt_dir}")
+            
         self.fabric, self.model, self.text_tokenizer, self.snacmodel, self.whispermodel = load_model(ckpt_dir, device)
+        print("OmniInference initialized successfully!")
 
     def warm_up(self, sample='./data/samples/output1.wav'):
+        print(f"Warming up model with sample: {sample}")
         for _ in self.run_AT_batch_stream(sample):
             pass
+        print("Model warm-up completed")
 
     @torch.inference_mode()
     def run_AT_batch_stream(self, 
