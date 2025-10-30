@@ -8,7 +8,7 @@ import flask
 import base64
 import tempfile
 import traceback
-from flask import Flask, Response, stream_with_context, render_template_string, jsonify, request
+from flask import Flask, Response, stream_with_context, render_template_string, jsonify
 
 HTML_TEMPLATE = r'''<!DOCTYPE html>
 <html lang="en">
@@ -17,123 +17,140 @@ HTML_TEMPLATE = r'''<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Mini-Omni Voice AI</title>
 <style>
-/* styles omitted for brevity */
+body{font-family:system-ui,Arial,sans-serif;max-width:860px;margin:0 auto;padding:24px;background:#0f172a;color:#e2e8f0}
+.container{background:#111827;border-radius:16px;padding:24px;border:1px solid #1f2937}
+h1{margin:0 0 12px}
+.status{padding:12px 14px;border-radius:10px;margin:8px 0;font-weight:600}
+.status.ready{background:#063f2e;border:1px solid #10b981}
+.status.processing{background:#3a2b05;border:1px solid #f59e0b}
+.status.error{background:#421c1d;border:1px solid #ef4444}
+.controls{text-align:center;margin:18px 0}
+.record-btn{background:#ef4444;border:none;color:#fff;padding:12px 20px;border-radius:9999px;font-size:16px;cursor:pointer}
+.record-btn.recording{background:#dc2626}
+.audio-player{width:100%;margin-top:12px}
+.loading{text-align:center}
+.spinner{border:4px solid rgba(255,255,255,.2);border-top:4px solid #fff;border-radius:50%;width:36px;height:36px;margin:10px auto;animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
 </style>
 </head>
 <body>
 <div class="container">
   <h1>🎤 Mini-Omni Voice AI</h1>
   <div id="status" class="status ready">✅ Ready for voice interaction</div>
-  <div class="tabs">
-    <button class="tab active" data-tab="voice">Voice Chat</button>
-    <button class="tab" data-tab="api">API Info</button>
-  </div>
-  <div id="voice-tab" class="tab-content active">
-    <div class="controls">
-      <button id="recordBtn" class="record-btn">🎤 Start Recording</button>
-    </div>
-  </div>
-  <div id="api-tab" class="tab-content">
-    <div class="api-info">
-      <h3>API Endpoint Information</h3>
-      <p><strong>Base URL:</strong> {{ base_url }}</p>
-      <p><strong>Chat Endpoint:</strong> POST /chat</p>
-      <pre>curl -X POST {{ base_url }}/chat -H "Content-Type: application/json" -d '{"audio":"base64_wav"}'</pre>
-    </div>
-  </div>
+  <div class="controls"><button id="recordBtn" class="record-btn">🎤 Start Recording</button></div>
   <div class="response">
-    <h3>Response:</h3>
-    <div id="loading" class="loading" style="display:none;"><div class="spinner"></div><p>Processing...</p></div>
+    <div id="loading" class="loading" style="display:none"><div class="spinner"></div><p>Processing...</p></div>
     <div id="result">No response yet. Start a conversation!</div>
-    <audio id="audioPlayer" class="audio-player" controls style="display:none;"></audio>
+    <audio id="audioPlayer" class="audio-player" controls style="display:none"></audio>
   </div>
 </div>
 <script>
-(() => {
-  let isRecording = false;
-  let mediaRecorder; let audioChunks = [];
-  const recordBtn = document.getElementById('recordBtn');
-  const statusEl = document.getElementById('status');
-  const resultEl = document.getElementById('result');
-  const loadingEl = document.getElementById('loading');
-  const audioPlayer = document.getElementById('audioPlayer');
+(()=>{
+  let isRecording=false; let mediaRecorder=null; let audioChunks=[]; let audioCtx=null;
+  const recordBtn=document.getElementById('recordBtn');
+  const statusEl=document.getElementById('status');
+  const resultEl=document.getElementById('result');
+  const loadingEl=document.getElementById('loading');
+  const audioPlayer=document.getElementById('audioPlayer');
 
-  // Tab handling
-  document.querySelectorAll('.tab').forEach(btn => {
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
-      document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active'));
-      btn.classList.add('active');
-      document.getElementById(btn.dataset.tab + '-tab').classList.add('active');
-    });
-  });
+  function setStatus(type,msg){ statusEl.className='status '+type; statusEl.textContent=msg; }
+
+  async function blobToBase64(blob){
+    const buf = await blob.arrayBuffer();
+    // Avoid call stack via String.fromCharCode spread; use chunked conversion
+    const bytes = new Uint8Array(buf);
+    let binary='';
+    const chunkSize = 0x8000; // 32KB
+    for (let i=0;i<bytes.length;i+=chunkSize){
+      const chunk = bytes.subarray(i, i+chunkSize);
+      binary += String.fromCharCode.apply(null, chunk);
+    }
+    return btoa(binary);
+  }
 
   async function sendAudioBlob(wavBlob){
-    loadingEl.style.display='block';
-    resultEl.textContent='Processing...';
     try{
-      const arrBuf = await wavBlob.arrayBuffer();
-      const b64 = btoa(String.fromCharCode(...new Uint8Array(arrBuf)));
+      loadingEl.style.display='block';
+      resultEl.textContent='Processing...';
+      const b64 = await blobToBase64(wavBlob);
       const res = await fetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({audio:b64,stream_stride:4,max_tokens:2048})});
       if(!res.ok) throw new Error('HTTP '+res.status);
       const outBlob = await res.blob();
-      const url = URL.createObjectURL(outBlob);
-      audioPlayer.src = url; audioPlayer.style.display='block'; audioPlayer.play();
+      audioPlayer.src = URL.createObjectURL(outBlob);
+      audioPlayer.style.display='block';
+      await audioPlayer.play().catch(()=>{});
       resultEl.innerHTML='🎵 <b>Voice response generated!</b>';
-      statusEl.className='status ready'; statusEl.textContent='✅ Response ready!';
-    }catch(e){
-      console.error(e); resultEl.textContent='Error: '+e.message; statusEl.className='status error'; statusEl.textContent='❌ Error processing request.';
-    } finally { loadingEl.style.display='none'; }
+      setStatus('ready','✅ Response ready!');
+    }catch(e){ console.error(e); setStatus('error','❌ Error: '+e.message); resultEl.textContent='Error: '+e.message; }
+    finally{ loadingEl.style.display='none'; }
   }
 
-  function toWavBlobFromPCM(pcmBlob){ return pcmBlob; }
+  function pcm16Wav(float32Array, sampleRate){
+    const length = float32Array.length;
+    const buffer = new ArrayBuffer(44 + length*2);
+    const view = new DataView(buffer);
+    function writeStr(off,str){ for(let i=0;i<str.length;i++) view.setUint8(off+i,str.charCodeAt(i)); }
+    writeStr(0,'RIFF'); view.setUint32(4,36+length*2,true); writeStr(8,'WAVE'); writeStr(12,'fmt ');
+    view.setUint32(16,16,true); view.setUint16(20,1,true); view.setUint16(22,1,true); view.setUint32(24,sampleRate,true); view.setUint32(28,sampleRate*2,true); view.setUint16(32,2,true); view.setUint16(34,16,true);
+    writeStr(36,'data'); view.setUint32(40,length*2,true);
+    let offset=44;
+    for(let i=0;i<length;i++,offset+=2){ const s=Math.max(-1,Math.min(1,float32Array[i])); view.setInt16(offset, s<0?s*0x8000:s*0x7FFF, true); }
+    return new Blob([buffer],{type:'audio/wav'});
+  }
 
-  recordBtn.addEventListener('click', async () => {
+  async function webmToWav(webmBlob){
+    // Decode with an AudioContext; guard against recursive decode causing stack overflow
+    try{
+      if(!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const arrayBuf = await webmBlob.arrayBuffer();
+      const decoded = await audioCtx.decodeAudioData(arrayBuf.slice(0));
+      // Downmix to mono and resample approximately by rendering to OfflineAudioContext
+      const targetRate = 16000;
+      const frames = Math.min(decoded.length, targetRate * Math.ceil(decoded.duration));
+      const offline = new OfflineAudioContext(1, frames, targetRate);
+      const src = offline.createBufferSource();
+      // Mixdown
+      const mono = offline.createBuffer(1, decoded.length, decoded.sampleRate);
+      const tmp = new Float32Array(decoded.length);
+      decoded.copyFromChannel(tmp, 0);
+      if(decoded.numberOfChannels>1){
+        const tmp2 = new Float32Array(decoded.length);
+        decoded.copyFromChannel(tmp2, 1);
+        for(let i=0;i<tmp.length;i++) tmp[i] = 0.5*(tmp[i]+tmp2[i]);
+      }
+      mono.copyToChannel(tmp,0);
+      src.buffer = mono; src.connect(offline.destination); src.start();
+      const rendered = await offline.startRendering();
+      const channel = rendered.getChannelData(0);
+      return pcm16Wav(channel, targetRate);
+    }catch(err){
+      // Fallback: send original webm (backend writes and handles file)
+      return webmBlob;
+    }
+  }
+
+  recordBtn.addEventListener('click', async ()=>{
     if(!isRecording){
       try{
         const stream = await navigator.mediaDevices.getUserMedia({audio:true});
         mediaRecorder = new MediaRecorder(stream, {mimeType: 'audio/webm'});
         audioChunks = [];
-        mediaRecorder.ondataavailable = e => { if(e.data && e.data.size>0) audioChunks.push(e.data); };
-        mediaRecorder.onstop = async () => {
-          // Convert webm to wav using offline AudioContext for broader backend compatibility
-          const webmBlob = new Blob(audioChunks, {type:'audio/webm'});
-          const arrayBuf = await webmBlob.arrayBuffer();
-          const audioCtx = new (window.OfflineAudioContext||window.webkitOfflineAudioContext)(1, 16000*5, 16000);
-          try{
-            const decoded = await (new AudioContext()).decodeAudioData(arrayBuf.slice(0));
-            const length = Math.min(decoded.length, 16000*30);
-            const offline = new OfflineAudioContext(1, length, 16000);
-            const buffer = offline.createBuffer(1, length, 16000);
-            decoded.copyFromChannel(buffer.getChannelData(0),0,0);
-            const src = offline.createBufferSource(); src.buffer = buffer; src.connect(offline.destination); src.start();
-            const rendered = await offline.startRendering();
-            const wav = PCM16Wav(rendered.getChannelData(0), 16000);
-            await sendAudioBlob(wav);
-          }catch(err){
-            // Fallback: send webm as-is (server supports temp file decoding)
-            await sendAudioBlob(webmBlob);
-          }
+        mediaRecorder.ondataavailable = (e)=>{ if(e.data && e.data.size>0) audioChunks.push(e.data); };
+        mediaRecorder.onstop = async ()=>{
+          const webmBlob = new Blob(audioChunks,{type:'audio/webm'});
+          const wavBlob = await webmToWav(webmBlob);
+          await sendAudioBlob(wavBlob);
+          // cleanup
+          stream.getTracks().forEach(t=>t.stop());
+          mediaRecorder = null; audioChunks = [];
         };
-        mediaRecorder.start(); isRecording=true; recordBtn.textContent='⏹️ Stop Recording'; recordBtn.classList.add('recording'); statusEl.className='status processing'; statusEl.textContent='🎤 Recording...';
-      }catch(e){ statusEl.className='status error'; statusEl.textContent='❌ Mic permission denied.'; }
+        mediaRecorder.start(); isRecording=true; recordBtn.textContent='⏹️ Stop Recording'; recordBtn.classList.add('recording'); setStatus('processing','🎤 Recording...');
+      }catch(e){ setStatus('error','❌ Mic permission denied or unsupported.'); }
     } else {
-      mediaRecorder.stop(); isRecording=false; recordBtn.textContent='🎤 Start Recording'; recordBtn.classList.remove('recording'); statusEl.className='status processing'; statusEl.textContent='⏳ Processing...';
-      mediaRecorder.stream.getTracks().forEach(t=>t.stop());
+      if(mediaRecorder && mediaRecorder.state!=='inactive') mediaRecorder.stop();
+      isRecording=false; recordBtn.textContent='🎤 Start Recording'; recordBtn.classList.remove('recording'); setStatus('processing','⏳ Processing...');
     }
   });
-
-  function PCM16Wav(float32Array, sampleRate){
-    const buffer = new ArrayBuffer(44 + float32Array.length*2);
-    const view = new DataView(buffer);
-    const writeString=(o,s)=>{for(let i=0;i<s.length;i++)view.setUint8(o+i,s.charCodeAt(i));};
-    const toPCM=(o,i)=>{const s=Math.max(-1,Math.min(1,float32Array[i]));view.setInt16(o, s<0?s*0x8000:s*0x7FFF, true);};
-    writeString(0,'RIFF'); view.setUint32(4,36+float32Array.length*2,true); writeString(8,'WAVE'); writeString(12,'fmt ');
-    view.setUint32(16,16,true); view.setUint16(20,1,true); view.setUint16(22,1,true); view.setUint32(24,sampleRate,true); view.setUint32(28,sampleRate*2,true); view.setUint16(32,2,true); view.setUint16(34,16,true);
-    writeString(36,'data'); view.setUint32(40,float32Array.length*2,true);
-    let offset=44; for(let i=0;i<float32Array.length;i++,offset+=2) toPCM(offset,i);
-    return new Blob([buffer], {type:'audio/wav'});
-  }
 })();
 </script>
 </body>
